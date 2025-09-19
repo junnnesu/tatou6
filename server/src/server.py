@@ -460,8 +460,9 @@ def create_app():
         # Fetch the document (enforce ownership)
         try:
             with get_engine().connect() as conn:
-                query = "SELECT * FROM Documents WHERE id = " + doc_id
-                row = conn.execute(text(query)).first()
+                # Fixed SQL injection vulnerability.
+                query = text("SELECT * FROM Documents WHERE id = :id")
+                row = conn.execute(query, {"id": doc_id}).first()
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
 

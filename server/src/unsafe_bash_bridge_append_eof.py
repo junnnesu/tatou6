@@ -34,24 +34,23 @@ class UnsafeBashBridgeAppendEOF(WatermarkingMethod):
     def get_usage() -> str:
         return "Toy method that appends a watermark record after the PDF EOF. Position and key are ignored."
 
-    def add_watermark(
-        self,
-        pdf,
-        secret: str,
-        key: str,
-        position: str | None = None,
-    ) -> bytes:
-        """Return a new PDF with a watermark record appended.
+    # Fixed a command injection vulnerability.
+    def add_watermark(self, pdf, secret: str, key: str, position: str | None = None) -> bytes:
+        pdf_path = Path(pdf)
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"{pdf_path} not found")
 
-        The ``position`` and ``key`` parameters are accepted for API compatibility but
-        ignored by this method.
-        """
-        data = load_pdf_bytes(pdf)
-        cmd = "cat " + str(pdf.resolve()) + " &&  printf \"" + secret + "\""
-        
-        res = subprocess.run(cmd, shell=True, check=True, capture_output=True)
-        
-        return res.stdout
+        MAX_READ_BYTES = 200 * 1024 * 1024  # 200 MB
+        size = pdf_path.stat().st_size
+        if size > MAX_READ_BYTES:
+            raise ValueError("file too large")
+
+        with pdf_path.open("rb") as f:
+            pdf_bytes = f.read()
+
+        secret_bytes = secret.encode("utf-8")
+        result = pdf_bytes + secret_bytes
+        return result
         
     def is_watermark_applicable(
         self,
@@ -65,9 +64,25 @@ class UnsafeBashBridgeAppendEOF(WatermarkingMethod):
         """Extract the secret if present.
            Prints whatever there is after %EOF
         """
-        cmd = "sed -n '1,/^\(%%EOF\|.*%%EOF\)$/!p' " + str(pdf.resolve())
-        
-        res = subprocess.run(cmd, shell=True, check=True, encoding="utf-8", capture_output=True)
+        # Fixed a command injection vulnerability.
+        marker = b"%EOF"
+        tail_limit = 1024 * 1024  # 1 MiB
+
+        with pdf.open("rb") as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            if file_size == 0:
+                res_stdout = ""
+            else:
+                read_size = min(file_size, tail_limit)
+                f.seek(file_size - read_size)
+                data = f.read(read_size)
+                idx = data.rfind(marker)
+                if idx != -1:
+                    after_bytes = data[idx + len(marker):]
+                else:
+                    after_bytes = b""
+                res_stdout = after_bytes.decode("utf-8", errors="replace")
        
 
         return res.stdout
