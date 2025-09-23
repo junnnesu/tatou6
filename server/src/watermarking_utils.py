@@ -42,7 +42,8 @@ from watermarking_method import (
     load_pdf_bytes,
 )
 from add_after_eof import AddAfterEOF
-from unsafe_bash_bridge_append_eof import UnsafeBashBridgeAppendEOF
+# 使用安全版本替换不安全的版本
+from safe_bash_bridge_append_eof import SafeBashBridgeAppendEOF
 
 # --------------------
 # Method registry
@@ -50,7 +51,7 @@ from unsafe_bash_bridge_append_eof import UnsafeBashBridgeAppendEOF
 
 METHODS: Dict[str, WatermarkingMethod] = {
     AddAfterEOF.name: AddAfterEOF(),
-    UnsafeBashBridgeAppendEOF.name: UnsafeBashBridgeAppendEOF()
+    SafeBashBridgeAppendEOF.name: SafeBashBridgeAppendEOF()  # 使用安全版本
 }
 """Registry of available watermarking methods.
 
@@ -249,4 +250,3 @@ __all__ = [
     "explore_pdf",
     "is_watermarking_applicable"
 ]
-

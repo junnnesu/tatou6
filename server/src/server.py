@@ -4,6 +4,7 @@ import hashlib
 import datetime as dt
 from pathlib import Path
 from functools import wraps
+import re
 
 from flask import Flask, jsonify, request, g, send_file
 from werkzeug.utils import secure_filename
@@ -13,16 +14,8 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
-import pickle as _std_pickle
-try:
-    import dill as _pickle  # allows loading classes not importable by module path
-except Exception:  # dill is optional
-    _pickle = _std_pickle
-
-
 import watermarking_utils as WMUtils
 from watermarking_method import WatermarkingMethod
-#from watermarking_utils import METHODS, apply_watermark, read_watermark, explore_pdf, is_watermarking_applicable, get_method
 
 def create_app():
     app = Flask(__name__)
@@ -84,11 +77,29 @@ def create_app():
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
         return h.hexdigest()
+    
+    def validate_email(email: str) -> bool:
+        """Basic email validation"""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(pattern, email) is not None
+    
+    def validate_username(username: str) -> bool:
+        """Username validation: 3-20 characters, alphanumeric plus _ and -"""
+        pattern = r'^[a-zA-Z0-9_-]{3,20}$'
+        return re.match(pattern, username) is not None
+    
+    def validate_password(password: str) -> tuple[bool, str]:
+        """Password validation with feedback"""
+        if len(password) < 8:
+            return False, "Password must be at least 8 characters"
+        return True, ""
 
     # --- Routes ---
     
     @app.route("/<path:filename>")
     def static_files(filename):
+        # Secure the filename to prevent path traversal
+        filename = secure_filename(filename)
         return app.send_static_file(filename)
 
     @app.route("/")
@@ -112,10 +123,23 @@ def create_app():
         email = (payload.get("email") or "").strip().lower()
         login = (payload.get("login") or "").strip()
         password = payload.get("password") or ""
+        
         if not email or not login or not password:
             return jsonify({"error": "email, login, and password are required"}), 400
+        
+        # Validate inputs
+        if not validate_email(email):
+            return jsonify({"error": "Invalid email format"}), 400
+        
+        if not validate_username(login):
+            return jsonify({"error": "Username must be 3-20 characters, alphanumeric, underscore or dash"}), 400
+        
+        valid_pwd, pwd_msg = validate_password(password)
+        if not valid_pwd:
+            return jsonify({"error": pwd_msg}), 400
 
-        hpw = generate_password_hash(password)
+        # Use stronger password hashing
+        hpw = generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
 
         try:
             with get_engine().begin() as conn:
@@ -131,16 +155,18 @@ def create_app():
         except IntegrityError:
             return jsonify({"error": "email or login already exists"}), 409
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in create_user: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         return jsonify({"id": row.id, "email": row.email, "login": row.login}), 201
 
-    # POST /api/login {login, password}
+    # POST /api/login {email, password}
     @app.post("/api/login")
     def login():
         payload = request.get_json(silent=True) or {}
         email = (payload.get("email") or "").strip()
         password = payload.get("password") or ""
+        
         if not email or not password:
             return jsonify({"error": "email and password are required"}), 400
 
@@ -151,7 +177,8 @@ def create_app():
                     {"email": email},
                 ).first()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in login: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         if not row or not check_password_hash(row.hpassword, password):
             return jsonify({"error": "invalid credentials"}), 401
@@ -169,15 +196,19 @@ def create_app():
         if not file or file.filename == "":
             return jsonify({"error": "empty filename"}), 400
 
-        fname = file.filename
+        # Secure the filename
+        fname = secure_filename(file.filename)
+        if not fname.lower().endswith('.pdf'):
+            return jsonify({"error": "Only PDF files are allowed"}), 400
 
-        user_dir = app.config["STORAGE_DIR"] / "files" / g.user["login"]
+        user_dir = app.config["STORAGE_DIR"] / "files" / secure_filename(g.user["login"])
         user_dir.mkdir(parents=True, exist_ok=True)
 
         ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
         final_name = request.form.get("name") or fname
         stored_name = f"{ts}__{fname}"
         stored_path = user_dir / stored_name
+        
         file.save(stored_path)
 
         sha_hex = _sha256_file(stored_path)
@@ -208,7 +239,8 @@ def create_app():
                     {"id": did},
                 ).one()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in upload_document: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         return jsonify({
             "id": int(row.id),
@@ -234,7 +266,8 @@ def create_app():
                     {"uid": int(g.user["id"])},
                 ).all()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in list_documents: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         docs = [{
             "id": int(r.id),
@@ -244,8 +277,6 @@ def create_app():
             "size": int(r.size),
         } for r in rows]
         return jsonify({"documents": docs}), 200
-
-
 
     # GET /api/list-versions
     @app.get("/api/list-versions")
@@ -268,12 +299,13 @@ def create_app():
                         FROM Users u
                         JOIN Documents d ON d.ownerid = u.id
                         JOIN Versions v ON d.id = v.documentid
-                        WHERE u.login = :glogin AND d.id = :did
+                        WHERE u.id = :uid AND d.id = :did
                     """),
-                    {"glogin": str(g.user["login"]), "did": document_id},
+                    {"uid": int(g.user["id"]), "did": document_id},
                 ).all()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in list_versions: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         versions = [{
             "id": int(r.id),
@@ -285,7 +317,6 @@ def create_app():
         } for r in rows]
         return jsonify({"versions": versions}), 200
     
-    
     # GET /api/list-all-versions
     @app.get("/api/list-all-versions")
     @require_auth
@@ -294,16 +325,17 @@ def create_app():
             with get_engine().connect() as conn:
                 rows = conn.execute(
                     text("""
-                        SELECT v.id, v.documentid, v.link, v.intended_for, v.method
+                        SELECT v.id, v.documentid, v.link, v.intended_for, v.method, v.secret
                         FROM Users u
                         JOIN Documents d ON d.ownerid = u.id
                         JOIN Versions v ON d.id = v.documentid
-                        WHERE u.login = :glogin
+                        WHERE u.id = :uid
                     """),
-                    {"glogin": str(g.user["login"])},
+                    {"uid": int(g.user["id"])},
                 ).all()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in list_all_versions: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         versions = [{
             "id": int(r.id),
@@ -311,6 +343,7 @@ def create_app():
             "link": r.link,
             "intended_for": r.intended_for,
             "method": r.method,
+            "secret": r.secret,
         } for r in rows]
         return jsonify({"versions": versions}), 200
     
@@ -319,7 +352,6 @@ def create_app():
     @app.get("/api/get-document/<int:document_id>")
     @require_auth
     def get_document(document_id: int | None = None):
-    
         # Support both path param and ?id=/ ?documentid=
         if document_id is None:
             document_id = request.args.get("id") or request.args.get("documentid")
@@ -340,20 +372,22 @@ def create_app():
                     {"id": document_id, "uid": int(g.user["id"])},
                 ).first()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in get_document: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
-        # Don’t leak whether a doc exists for another user
         if not row:
             return jsonify({"error": "document not found"}), 404
 
         file_path = Path(row.path)
 
-        # Basic safety: ensure path is inside STORAGE_DIR and exists
+        # Enhanced path safety check
         try:
-            file_path.resolve().relative_to(app.config["STORAGE_DIR"].resolve())
-        except Exception:
-            # Path looks suspicious or outside storage
-            return jsonify({"error": "document path invalid"}), 500
+            file_path = file_path.resolve()
+            storage_root = app.config["STORAGE_DIR"].resolve()
+            file_path.relative_to(storage_root)
+        except (ValueError, Exception):
+            app.logger.warning(f"Path traversal attempt for document {document_id}")
+            return jsonify({"error": "Invalid document path"}), 500
 
         if not file_path.exists():
             return jsonify({"error": "file missing on disk"}), 410
@@ -364,11 +398,11 @@ def create_app():
             mimetype="application/pdf",
             as_attachment=False,
             download_name=row.name if row.name.lower().endswith(".pdf") else f"{row.name}.pdf",
-            conditional=True,   # enables 304 if If-Modified-Since/Range handling
+            conditional=True,
             max_age=0,
             last_modified=file_path.stat().st_mtime,
         )
-        # Strong validator
+        
         if isinstance(row.sha256_hex, str) and row.sha256_hex:
             resp.set_etag(row.sha256_hex.lower())
 
@@ -378,6 +412,8 @@ def create_app():
     # GET /api/get-version/<link>  → returns the watermarked PDF (inline)
     @app.get("/api/get-version/<link>")
     def get_version(link: str):
+        # Sanitize the link parameter
+        link = secure_filename(link)
         
         try:
             with get_engine().connect() as conn:
@@ -391,59 +427,43 @@ def create_app():
                     {"link": link},
                 ).first()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in get_version: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
-        # Don’t leak whether a doc exists for another user
         if not row:
             return jsonify({"error": "document not found"}), 404
 
         file_path = Path(row.path)
 
-        # Basic safety: ensure path is inside STORAGE_DIR and exists
+        # Enhanced path safety check
         try:
-            file_path.resolve().relative_to(app.config["STORAGE_DIR"].resolve())
-        except Exception:
-            # Path looks suspicious or outside storage
-            return jsonify({"error": "document path invalid"}), 500
+            file_path = file_path.resolve()
+            storage_root = app.config["STORAGE_DIR"].resolve()
+            file_path.relative_to(storage_root)
+        except (ValueError, Exception):
+            app.logger.warning(f"Path traversal attempt for version link {link}")
+            return jsonify({"error": "Invalid document path"}), 500
 
         if not file_path.exists():
             return jsonify({"error": "file missing on disk"}), 410
 
-        # Serve inline with caching hints + ETag based on stored sha256
         resp = send_file(
             file_path,
             mimetype="application/pdf",
             as_attachment=False,
             download_name=row.link if row.link.lower().endswith(".pdf") else f"{row.link}.pdf",
-            conditional=True,   # enables 304 if If-Modified-Since/Range handling
+            conditional=True,
             max_age=0,
             last_modified=file_path.stat().st_mtime,
         )
 
         resp.headers["Cache-Control"] = "private, max-age=0"
         return resp
-    
-    # Helper: resolve path safely under STORAGE_DIR (handles absolute/relative)
-    def _safe_resolve_under_storage(p: str, storage_root: Path) -> Path:
-        storage_root = storage_root.resolve()
-        fp = Path(p)
-        if not fp.is_absolute():
-            fp = storage_root / fp
-        fp = fp.resolve()
-        # Python 3.12 has is_relative_to on Path
-        if hasattr(fp, "is_relative_to"):
-            if not fp.is_relative_to(storage_root):
-                raise RuntimeError(f"path {fp} escapes storage root {storage_root}")
-        else:
-            try:
-                fp.relative_to(storage_root)
-            except ValueError:
-                raise RuntimeError(f"path {fp} escapes storage root {storage_root}")
-        return fp
 
     # DELETE /api/delete-document  (and variants)
-    @app.route("/api/delete-document", methods=["DELETE", "POST"])  # POST supported for convenience
+    @app.route("/api/delete-document", methods=["DELETE", "POST"])
     @app.route("/api/delete-document/<document_id>", methods=["DELETE"])
+    @require_auth
     def delete_document(document_id: int | None = None):
         # accept id from path, query (?id= / ?documentid=), or JSON body on POST
         if not document_id:
@@ -453,69 +473,70 @@ def create_app():
                 or (request.is_json and (request.get_json(silent=True) or {}).get("id"))
             )
         try:
-            doc_id = document_id
+            doc_id = int(document_id)
         except (TypeError, ValueError):
             return jsonify({"error": "document id required"}), 400
 
-        # Fetch the document (enforce ownership)
+        # FIXED SQL INJECTION: Use parameterized query
         try:
             with get_engine().connect() as conn:
-                # Fixed SQL injection vulnerability.
-                query = text("SELECT * FROM Documents WHERE id = :id")
-                row = conn.execute(query, {"id": doc_id}).first()
+                row = conn.execute(
+                    text("SELECT * FROM Documents WHERE id = :id AND ownerid = :uid"),
+                    {"id": doc_id, "uid": int(g.user["id"])}
+                ).first()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in delete_document: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         if not row:
-            # Don’t reveal others’ docs—just say not found
             return jsonify({"error": "document not found"}), 404
 
         # Resolve and delete file (best effort)
-        storage_root = Path(app.config["STORAGE_DIR"])
+        storage_root = app.config["STORAGE_DIR"].resolve()
         file_deleted = False
         file_missing = False
         delete_error = None
+        
         try:
-            fp = _safe_resolve_under_storage(row.path, storage_root)
-            if fp.exists():
+            file_path = Path(row.path).resolve()
+            # Verify path is within storage
+            file_path.relative_to(storage_root)
+            
+            if file_path.exists():
                 try:
-                    fp.unlink()
+                    file_path.unlink()
                     file_deleted = True
                 except Exception as e:
-                    delete_error = f"failed to delete file: {e}"
-                    app.logger.warning("Failed to delete file %s for doc id=%s: %s", fp, row.id, e)
+                    delete_error = "failed to delete file"
+                    app.logger.warning(f"Failed to delete file {file_path} for doc id={row.id}: {e}")
             else:
                 file_missing = True
-        except RuntimeError as e:
-            # Path escapes storage root; refuse to touch the file
-            delete_error = str(e)
-            app.logger.error("Path safety check failed for doc id=%s: %s", row.id, e)
+        except (ValueError, Exception) as e:
+            delete_error = "Invalid file path"
+            app.logger.error(f"Path safety check failed for doc id={row.id}: {e}")
 
-        # Delete DB row (will cascade to Version if FK has ON DELETE CASCADE)
+        # Delete DB row
         try:
             with get_engine().begin() as conn:
-                # If your schema does NOT have ON DELETE CASCADE on Version.documentid,
-                # uncomment the next line first:
-                # conn.execute(text("DELETE FROM Version WHERE documentid = :id"), {"id": doc_id})
                 conn.execute(text("DELETE FROM Documents WHERE id = :id"), {"id": doc_id})
         except Exception as e:
-            return jsonify({"error": f"database error during delete: {str(e)}"}), 503
+            app.logger.error(f"Database error during delete: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         return jsonify({
             "deleted": True,
             "id": doc_id,
             "file_deleted": file_deleted,
             "file_missing": file_missing,
-            "note": delete_error,   # null/omitted if everything was fine
+            "note": delete_error,
         }), 200
         
-        
-    # POST /api/create-watermark or /api/create-watermark/<id>  → create watermarked pdf and returns metadata
+    # POST /api/create-watermark or /api/create-watermark/<id>
     @app.post("/api/create-watermark")
     @app.post("/api/create-watermark/<int:document_id>")
     @require_auth
     def create_watermark(document_id: int | None = None):
-        # accept id from path, query (?id= / ?documentid=), or JSON body on GET
+        # accept id from path, query (?id= / ?documentid=), or JSON body
         if not document_id:
             document_id = (
                 request.args.get("id")
@@ -523,12 +544,11 @@ def create_app():
                 or (request.is_json and (request.get_json(silent=True) or {}).get("id"))
             )
         try:
-            doc_id = document_id
+            doc_id = int(document_id)
         except (TypeError, ValueError):
             return jsonify({"error": "document id required"}), 400
             
         payload = request.get_json(silent=True) or {}
-        # allow a couple of aliases for convenience
         method = payload.get("method")
         intended_for = payload.get("intended_for")
         position = payload.get("position") or None
@@ -536,10 +556,6 @@ def create_app():
         key = payload.get("key")
 
         # validate input
-        try:
-            doc_id = int(doc_id)
-        except (TypeError, ValueError):
-            return jsonify({"error": "document_id (int) is required"}), 400
         if not method or not intended_for or not isinstance(secret, str) or not isinstance(key, str):
             return jsonify({"error": "method, intended_for, secret, and key are required"}), 400
 
@@ -550,27 +566,26 @@ def create_app():
                     text("""
                         SELECT id, name, path
                         FROM Documents
-                        WHERE id = :id
+                        WHERE id = :id AND ownerid = :uid
                         LIMIT 1
                     """),
-                    {"id": doc_id},
+                    {"id": doc_id, "uid": int(g.user["id"])},
                 ).first()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in create_watermark: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         if not row:
             return jsonify({"error": "document not found"}), 404
 
         # resolve path safely under STORAGE_DIR
-        storage_root = Path(app.config["STORAGE_DIR"]).resolve()
-        file_path = Path(row.path)
-        if not file_path.is_absolute():
-            file_path = storage_root / file_path
-        file_path = file_path.resolve()
+        storage_root = app.config["STORAGE_DIR"].resolve()
         try:
+            file_path = Path(row.path).resolve()
             file_path.relative_to(storage_root)
-        except ValueError:
-            return jsonify({"error": "document path invalid"}), 500
+        except (ValueError, Exception):
+            return jsonify({"error": "Invalid document path"}), 500
+            
         if not file_path.exists():
             return jsonify({"error": "file missing on disk"}), 410
 
@@ -586,7 +601,7 @@ def create_app():
         except Exception as e:
             return jsonify({"error": f"watermark applicability check failed: {e}"}), 400
 
-        # apply watermark → bytes
+        # apply watermark
         try:
             wm_bytes: bytes = WMUtils.apply_watermark(
                 pdf=str(file_path),
@@ -600,7 +615,7 @@ def create_app():
         except Exception as e:
             return jsonify({"error": f"watermarking failed: {e}"}), 500
 
-        # build destination file name: "<original_name>__<intended_to>.pdf"
+        # build destination file name
         base_name = Path(row.name or file_path.name).stem
         intended_slug = secure_filename(intended_for)
         dest_dir = file_path.parent / "watermarks"
@@ -633,7 +648,7 @@ def create_app():
                         "secret": secret,
                         "method": method,
                         "position": position or "",
-                        "path": dest_path
+                        "path": str(dest_path)
                     },
                 )
                 vid = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
@@ -643,7 +658,8 @@ def create_app():
                 dest_path.unlink(missing_ok=True)
             except Exception:
                 pass
-            return jsonify({"error": f"database error during version insert: {e}"}), 503
+            app.logger.error(f"Database error during version insert: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         return jsonify({
             "id": vid,
@@ -656,79 +672,16 @@ def create_app():
             "size": len(wm_bytes),
         }), 201
         
-        
     @app.post("/api/load-plugin")
     @require_auth
     def load_plugin():
-        """
-        Load a serialized Python class implementing WatermarkingMethod from
-        STORAGE_DIR/files/plugins/<filename>.{pkl|dill} and register it in wm_mod.METHODS.
-        Body: { "filename": "MyMethod.pkl", "overwrite": false }
-        """
-        payload = request.get_json(silent=True) or {}
-        filename = (payload.get("filename") or "").strip()
-        overwrite = bool(payload.get("overwrite", False))
-
-        if not filename:
-            return jsonify({"error": "filename is required"}), 400
-
-        # Locate the plugin in /storage/files/plugins (relative to STORAGE_DIR)
-        storage_root = Path(app.config["STORAGE_DIR"])
-        plugins_dir = storage_root / "files" / "plugins"
-        try:
-            plugins_dir.mkdir(parents=True, exist_ok=True)
-            plugin_path = plugins_dir / filename
-        except Exception as e:
-            return jsonify({"error": f"plugin path error: {e}"}), 500
-
-        if not plugin_path.exists():
-            return jsonify({"error": f"plugin file not found: {safe}"}), 404
-
-        # Unpickle the object (dill if available; else std pickle)
-        try:
-            with plugin_path.open("rb") as f:
-                obj = _pickle.load(f)
-        except Exception as e:
-            return jsonify({"error": f"failed to deserialize plugin: {e}"}), 400
-
-        # Accept: class object, or instance (we'll promote instance to its class)
-        if isinstance(obj, type):
-            cls = obj
-        else:
-            cls = obj.__class__
-
-        # Determine method name for registry
-        method_name = getattr(cls, "name", getattr(cls, "__name__", None))
-        if not method_name or not isinstance(method_name, str):
-            return jsonify({"error": "plugin class must define a readable name (class.__name__ or .name)"}), 400
-
-        # Validate interface: either subclass of WatermarkingMethod or duck-typing
-        has_api = all(hasattr(cls, attr) for attr in ("add_watermark", "read_secret"))
-        if WatermarkingMethod is not None:
-            is_ok = issubclass(cls, WatermarkingMethod) and has_api
-        else:
-            is_ok = has_api
-        if not is_ok:
-            return jsonify({"error": "plugin does not implement WatermarkingMethod API (add_watermark/read_secret)"}), 400
-            
-        # Register the class (not an instance) so you can instantiate as needed later
-        WMUtils.METHODS[method_name] = cls()
-        
-        return jsonify({
-            "loaded": True,
-            "filename": filename,
-            "registered_as": method_name,
-            "class_qualname": f"{getattr(cls, '__module__', '?')}.{getattr(cls, '__qualname__', cls.__name__)}",
-            "methods_count": len(WMUtils.METHODS)
-        }), 201
-        
+        # SECURITY FIX: Disable unsafe pickle loading
+        return jsonify({"error": "Plugin loading is disabled for security reasons"}), 403
     
-    
-    # GET /api/get-watermarking-methods -> {"methods":[{"name":..., "description":...}, ...], "count":N}
+    # GET /api/get-watermarking-methods
     @app.get("/api/get-watermarking-methods")
     def get_watermarking_methods():
         methods = []
-
         for m in WMUtils.METHODS:
             methods.append({"name": m, "description": WMUtils.get_method(m).get_usage()})
             
@@ -747,51 +700,45 @@ def create_app():
                 or (request.is_json and (request.get_json(silent=True) or {}).get("id"))
             )
         try:
-            doc_id = document_id
+            doc_id = int(document_id)
         except (TypeError, ValueError):
             return jsonify({"error": "document id required"}), 400
             
         payload = request.get_json(silent=True) or {}
-        # allow a couple of aliases for convenience
         method = payload.get("method")
         position = payload.get("position") or None
         key = payload.get("key")
 
         # validate input
-        try:
-            doc_id = int(doc_id)
-        except (TypeError, ValueError):
-            return jsonify({"error": "document_id (int) is required"}), 400
         if not method or not isinstance(key, str):
-            return jsonify({"error": "method, and key are required"}), 400
+            return jsonify({"error": "method and key are required"}), 400
 
-        # lookup the document; FIXME enforce ownership
+        # lookup the document; enforce ownership
         try:
             with get_engine().connect() as conn:
                 row = conn.execute(
                     text("""
                         SELECT id, name, path
                         FROM Documents
-                        WHERE id = :id
+                        WHERE id = :id AND ownerid = :uid
                     """),
-                    {"id": doc_id},
+                    {"id": doc_id, "uid": int(g.user["id"])},
                 ).first()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.error(f"Database error in read_watermark: {e}")
+            return jsonify({"error": "Internal server error"}), 503
 
         if not row:
             return jsonify({"error": "document not found"}), 404
 
         # resolve path safely under STORAGE_DIR
-        storage_root = Path(app.config["STORAGE_DIR"]).resolve()
-        file_path = Path(row.path)
-        if not file_path.is_absolute():
-            file_path = storage_root / file_path
-        file_path = file_path.resolve()
+        storage_root = app.config["STORAGE_DIR"].resolve()
         try:
+            file_path = Path(row.path).resolve()
             file_path.relative_to(storage_root)
-        except ValueError:
-            return jsonify({"error": "document path invalid"}), 500
+        except (ValueError, Exception):
+            return jsonify({"error": "Invalid document path"}), 500
+            
         if not file_path.exists():
             return jsonify({"error": "file missing on disk"}), 410
         
@@ -804,6 +751,7 @@ def create_app():
             )
         except Exception as e:
             return jsonify({"error": f"Error when attempting to read watermark: {e}"}), 400
+            
         return jsonify({
             "documentid": doc_id,
             "secret": secret,
@@ -820,4 +768,3 @@ app = create_app()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
