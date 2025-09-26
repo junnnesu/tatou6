@@ -23,6 +23,15 @@ except Exception:  # dill is optional
 import watermarking_utils as WMUtils
 from watermarking_method import WatermarkingMethod
 
+"""
+Complete RMAP Implementation for Group 6
+"""
+from rmap.identity_manager import IdentityManager
+from rmap.rmap import RMAP
+import base64
+import secrets
+import json
+
 def create_app():
     app = Flask(__name__)
 
@@ -795,6 +804,321 @@ def create_app():
             "method": method,
             "position": position
         }), 201
+
+    # Initialize RMAP
+    def init_rmap():
+        """Initialize RMAP handler with server keys and client public keys."""
+        try:
+            # Use Group 6's private key as server private key
+            server_priv_path = app.config["STORAGE_DIR"] / "pki" / "g6.asc"
+            
+            # For server public key, we need to extract it from the private key
+            # Or use Group_06.asc if that's our public key
+            server_pub_path = app.config["STORAGE_DIR"] / "pki" / "Group_06.asc"
+            
+            # Client public keys directory
+            client_keys_dir = app.config["STORAGE_DIR"] / "pki"
+            
+            if not server_priv_path.exists():
+                app.logger.error(f"Server private key not found at {server_priv_path}")
+                return None
+                
+            if not server_pub_path.exists():
+                app.logger.warning(f"Server public key not found at {server_pub_path}, will extract from private")
+                # Extract public key from private key using GPG
+                import subprocess
+                try:
+                    result = subprocess.run(
+                        ["gpg", "--import", str(server_priv_path)],
+                        capture_output=True,
+                        text=True
+                    )
+                    # Export the public key
+                    pub_result = subprocess.run(
+                        ["gpg", "--armor", "--export", "Group 6"],
+                        capture_output=True,
+                        text=True
+                    )
+                    if pub_result.stdout:
+                        server_pub_path = app.config["STORAGE_DIR"] / "pki" / "server_pub.asc"
+                        server_pub_path.write_text(pub_result.stdout)
+                except Exception as e:
+                    app.logger.error(f"Failed to extract public key: {e}")
+            
+            # Initialize identity manager with client public keys
+            identity_manager = IdentityManager()
+            
+            # Load all group public keys
+            for key_file in client_keys_dir.glob("Group_*.asc"):
+                # Extract group number from filename
+                group_name = key_file.stem.replace("_", " ")  # "Group_06" -> "Group 06"
+                
+                # Also handle different naming formats
+                if group_name == "Group 06":
+                    # Add variations for our own group
+                    identity_variants = ["Group 6", "Group 06", "Group_6", "Group_06"]
+                else:
+                    # For other groups, be flexible with naming
+                    group_num = key_file.stem.split("_")[1].lstrip("0")  # Remove leading zeros
+                    identity_variants = [
+                        f"Group {group_num}",
+                        f"Group {key_file.stem.split('_')[1]}",  # With leading zeros
+                        key_file.stem.replace("_", " ")
+                    ]
+                
+                with open(key_file, 'r') as f:
+                    public_key = f.read()
+                    for variant in identity_variants:
+                        identity_manager.add_identity(variant, public_key)
+                        app.logger.info(f"Added identity: {variant}")
+            
+            # Read server keys
+            with open(server_priv_path, 'r') as f:
+                server_priv = f.read()
+            
+            # Try to read public key, or use the one we extracted
+            if server_pub_path.exists():
+                with open(server_pub_path, 'r') as f:
+                    server_pub = f.read()
+            else:
+                # If we still don't have a public key, use the Group_06.asc
+                with open(app.config["STORAGE_DIR"] / "pki" / "Group_06.asc", 'r') as f:
+                    server_pub = f.read()
+            
+            # Initialize RMAP handler
+            rmap_handler = RMAP(server_priv, server_pub, identity_manager)
+            
+            app.logger.info("RMAP initialized successfully")
+            return rmap_handler
+            
+        except Exception as e:
+            app.logger.error(f"Failed to initialize RMAP: {e}")
+            import traceback
+            app.logger.error(traceback.format_exc())
+            return None
+
+    # Initialize RMAP when app starts
+    app.rmap_handler = init_rmap()
+    app.rmap_sessions = {}  # Store session data
+
+    # RMAP Routes
+    @app.post("/api/rmap-initiate")
+    def rmap_initiate():
+        """RMAP Authentication - Message 1."""
+        if not app.rmap_handler:
+            return jsonify({"error": "RMAP not configured"}), 503
+            
+        try:
+            payload = request.get_json(silent=True) or {}
+            encrypted_payload = payload.get("payload")
+            
+            if not encrypted_payload:
+                return jsonify({"error": "payload required"}), 400
+            
+            # The payload should be base64-encoded ASCII-armored PGP
+            try:
+                # Decode base64
+                armored_message = base64.b64decode(encrypted_payload).decode('ascii')
+            except Exception as e:
+                app.logger.error(f"Failed to decode payload: {e}")
+                return jsonify({"error": "invalid base64 encoding"}), 400
+            
+            # Process Message 1 using RMAP library
+            try:
+                response = app.rmap_handler.process_message_1(armored_message)
+            except Exception as e:
+                app.logger.error(f"RMAP process_message_1 failed: {e}")
+                return jsonify({"error": f"RMAP processing failed: {str(e)}"}), 500
+            
+            if response['success']:
+                # Store session info for Message 2
+                session_key = f"{response['identity']}:{response['nonce_client']}"
+                app.rmap_sessions[session_key] = {
+                    'identity': response['identity'],
+                    'nonce_client': response['nonce_client'],
+                    'nonce_server': response['nonce_server'],
+                    'timestamp': dt.datetime.utcnow()
+                }
+                
+                app.logger.info(f"RMAP session created for {response['identity']}")
+                
+                # Response should be ASCII-armored PGP, encode it to base64
+                response_payload = base64.b64encode(response['response'].encode('ascii')).decode('ascii')
+                return jsonify({"payload": response_payload}), 200
+            else:
+                app.logger.error(f"RMAP initiation failed: {response.get('error', 'Unknown error')}")
+                return jsonify({"error": response.get('error', 'RMAP initiation failed')}), 401
+                
+        except Exception as e:
+            app.logger.error(f"RMAP initiate error: {e}")
+            import traceback
+            app.logger.error(traceback.format_exc())
+            return jsonify({"error": "internal error processing RMAP"}), 500
+
+    @app.post("/api/rmap-get-link")
+    def rmap_get_link():
+        """RMAP Authentication - Message 2 and watermark generation."""
+        if not app.rmap_handler:
+            return jsonify({"error": "RMAP not configured"}), 503
+            
+        try:
+            payload = request.get_json(silent=True) or {}
+            encrypted_payload = payload.get("payload")
+            
+            if not encrypted_payload:
+                return jsonify({"error": "payload required"}), 400
+            
+            # Decode base64 to get ASCII-armored message
+            try:
+                armored_message = base64.b64decode(encrypted_payload).decode('ascii')
+            except Exception:
+                return jsonify({"error": "invalid base64 encoding"}), 400
+            
+            # Process Message 2 using RMAP library
+            try:
+                response = app.rmap_handler.process_message_2(armored_message)
+            except Exception as e:
+                app.logger.error(f"RMAP process_message_2 failed: {e}")
+                return jsonify({"error": f"RMAP processing failed: {str(e)}"}), 500
+            
+            if not response['success']:
+                return jsonify({"error": response.get('error', 'RMAP verification failed')}), 401
+            
+            # Find the matching session
+            session_found = None
+            session_key = None
+            for sk, session_data in app.rmap_sessions.items():
+                if session_data['nonce_server'] == response['nonce_server']:
+                    session_found = session_data
+                    session_key = sk
+                    break
+            
+            if not session_found:
+                app.logger.error("No matching session found for nonce_server")
+                return jsonify({"error": "session not found"}), 401
+            
+            # Clean up old sessions (older than 5 minutes)
+            cutoff_time = dt.datetime.utcnow() - dt.timedelta(minutes=5)
+            old_sessions = [k for k, v in app.rmap_sessions.items() 
+                          if v['timestamp'] < cutoff_time]
+            for k in old_sessions:
+                del app.rmap_sessions[k]
+            
+            # Generate the link from concatenated nonces (as per spec)
+            # The link should be the concatenation of client and server nonces
+            link_hex = f"{session_found['nonce_client']:016x}{session_found['nonce_server']:016x}"
+            # Take first 32 hex chars as specified
+            link_hex = link_hex[:32]
+            
+            app.logger.info(f"Generated link: {link_hex} for {session_found['identity']}")
+            
+            # Get or create a watermarked PDF for this group
+            identity = session_found['identity']
+            
+            try:
+                with get_engine().begin() as conn:
+                    # Check if watermarked version already exists for this link
+                    existing = conn.execute(
+                        text("SELECT * FROM Versions WHERE link = :link"),
+                        {"link": link_hex}
+                    ).first()
+                    
+                    if not existing:
+                        # Find or create a document to watermark
+                        # First, try to find a flag document
+                        doc_row = conn.execute(
+                            text("""
+                                SELECT d.id, d.name, d.path 
+                                FROM Documents d 
+                                JOIN Users u ON d.ownerid = u.id 
+                                WHERE u.login = 'MrImportant' 
+                                   OR d.name LIKE '%flag%'
+                                   OR u.login = 'admin'
+                                ORDER BY d.id ASC
+                                LIMIT 1
+                            """)
+                        ).first()
+                        
+                        if not doc_row:
+                            # Create a default document if none exists
+                            app.logger.warning("No document found, creating default")
+                            # You should have at least one document in the system
+                            # This is a fallback - ideally you should prepare documents beforehand
+                            return jsonify({"error": "no document available for watermarking"}), 404
+                        
+                        app.logger.info(f"Using document {doc_row.id}: {doc_row.name}")
+                        
+                        # Resolve file path
+                        file_path = _safe_resolve_under_storage(doc_row.path, app.config["STORAGE_DIR"])
+                        
+                        # Use your best watermarking method
+                        # Check which methods are available
+                        available_methods = list(WMUtils.METHODS.keys())
+                        best_method = "text-overlay" if "text-overlay" in available_methods else "toy-eof"
+                        
+                        # Create unique secret for this group
+                        secret = f"RMAP-{identity}-{link_hex[:8]}"
+                        key = app.config["SECRET_KEY"] or "default-rmap-key"
+                        
+                        app.logger.info(f"Applying watermark with method: {best_method}")
+                        
+                        # Apply watermark
+                        wm_bytes = WMUtils.apply_watermark(
+                            pdf=str(file_path),
+                            secret=secret,
+                            key=key,
+                            method=best_method,
+                            position="diagonal"
+                        )
+                        
+                        # Save watermarked file
+                        wm_dir = app.config["STORAGE_DIR"] / "rmap_watermarks"
+                        wm_dir.mkdir(parents=True, exist_ok=True)
+                        wm_path = wm_dir / f"rmap_{link_hex}.pdf"
+                        
+                        with wm_path.open("wb") as f:
+                            f.write(wm_bytes)
+                        
+                        app.logger.info(f"Watermarked PDF saved to {wm_path}")
+                        
+                        # Store in database
+                        conn.execute(
+                            text("""
+                                INSERT INTO Versions (documentid, link, intended_for, secret, method, position, path)
+                                VALUES (:documentid, :link, :intended_for, :secret, :method, :position, :path)
+                            """),
+                            {
+                                "documentid": doc_row.id,
+                                "link": link_hex,
+                                "intended_for": identity,
+                                "secret": secret,
+                                "method": best_method,
+                                "position": "diagonal",
+                                "path": str(wm_path)
+                            }
+                        )
+                        
+                        app.logger.info(f"Version record created in database")
+            
+            except Exception as e:
+                app.logger.error(f"Error creating watermarked PDF: {e}")
+                import traceback
+                app.logger.error(traceback.format_exc())
+                return jsonify({"error": "failed to create watermarked PDF"}), 500
+            
+            # Clean up session
+            if session_key in app.rmap_sessions:
+                del app.rmap_sessions[session_key]
+            
+            # Return the link as per specification
+            return jsonify({"result": link_hex}), 200
+            
+        except Exception as e:
+            app.logger.error(f"RMAP get-link error: {e}")
+            import traceback
+            app.logger.error(traceback.format_exc())
+            return jsonify({"error": "internal error processing RMAP"}), 500
+
 
     return app
     
