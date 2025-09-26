@@ -48,6 +48,13 @@ try:
 except ImportError:
     has_text_overlay = False
 
+# Import the unsafe Yuwei Cao method if available
+try:
+    from yuwei_cao_watermark import YuweiCaoWatermark
+    has_yuwei_method = True
+except ImportError:
+    has_yuwei_method = False
+
 # --------------------
 # Method registry
 # --------------------
@@ -60,6 +67,10 @@ METHODS: Dict[str, WatermarkingMethod] = {
 # Add text overlay if available
 if has_text_overlay:
     METHODS[TextOverlayWatermark.name] = TextOverlayWatermark()
+
+# Add Yuwei Cao method if available
+if has_yuwei_method:
+    METHODS[YuweiCaoWatermark.name] = YuweiCaoWatermark()
 
 """Registry of available watermarking methods.
 
