@@ -9,7 +9,6 @@ This module exposes:
 - :func:`explore_pdf`: build a lightweight JSON-serializable tree of PDF
   nodes with deterministic identifiers ("name nodes").
 - :func:`apply_watermark`: run a concrete watermarking method on a PDF.
-- :func:`apply_watermark`: run a concrete watermarking method on a PDF.
 - :func:`read_watermark`: recover a secret using a concrete method.
 - :func:`register_method` / :func:`get_method`: registry helpers.
 
@@ -42,26 +41,60 @@ from watermarking_method import (
     load_pdf_bytes,
 )
 from add_after_eof import AddAfterEOF
-from unsafe_bash_bridge_append_eof import UnsafeBashBridgeAppendEOF
+# Import the safe text overlay method if available
+try:
+    from text_overlay_watermark import TextOverlayWatermark
+    has_text_overlay = True
+except ImportError:
+    has_text_overlay = False
+
+# Import the unsafe Yuwei Cao method if available
+try:
+    from yuwei_cao_watermark import YuweiCaoWatermark
+    has_yuwei_method = True
+except ImportError:
+    has_yuwei_method = False
 
 # --------------------
 # Method registry
 # --------------------
 
+# Initialize with safe methods only
 METHODS: Dict[str, WatermarkingMethod] = {
     AddAfterEOF.name: AddAfterEOF(),
-    UnsafeBashBridgeAppendEOF.name: UnsafeBashBridgeAppendEOF()
 }
+
+# Add text overlay if available
+if has_text_overlay:
+    METHODS[TextOverlayWatermark.name] = TextOverlayWatermark()
+
+# Add Yuwei Cao method if available
+if has_yuwei_method:
+    METHODS[YuweiCaoWatermark.name] = YuweiCaoWatermark()
+
 """Registry of available watermarking methods.
 
 Keys are human-readable method names (stable, lowercase, hyphenated)
 exposed by each implementation's ``.name`` attribute. Values are
 *instances* of the corresponding class.
+
+NOTE: The unsafe_bash_bridge_append_eof method has been removed for security reasons.
 """
 
 
 def register_method(method: WatermarkingMethod) -> None:
-    """Register (or replace) a watermarking method instance by name."""
+    """Register (or replace) a watermarking method instance by name.
+    
+    Note: Be careful when registering methods dynamically as they may
+    contain security vulnerabilities.
+    """
+    # Basic validation to prevent obviously dangerous method names
+    if hasattr(method, 'name'):
+        method_name = method.name
+        # Prevent registration of known unsafe methods
+        if 'bash' in method_name.lower() or 'unsafe' in method_name.lower():
+            raise ValueError(f"Cannot register potentially unsafe method: {method_name}")
+    
     METHODS[method.name] = method
 
 
@@ -79,7 +112,7 @@ def get_method(method: str | WatermarkingMethod) -> WatermarkingMethod:
         return METHODS[method]
     except KeyError as exc:
         raise KeyError(
-            f"Unknown watermarking method: {method!r}. Known: {sorted(METHODS)}"
+            f"Unknown watermarking method: {method!r}. Available methods: {sorted(METHODS)}"
         ) from exc
 
 
@@ -94,22 +127,72 @@ def apply_watermark(
     key: str,
     position: str | None = None,
 ) -> bytes:
-    """Apply a watermark using the specified method and return new PDF bytes."""
+    """Apply a watermark using the specified method and return new PDF bytes.
+    
+    Parameters
+    ----------
+    method : str or WatermarkingMethod
+        The watermarking method to use
+    pdf : PdfSource
+        The source PDF
+    secret : str
+        The secret to embed
+    key : str
+        The key for encryption/authentication
+    position : str, optional
+        Position hint for the watermark
+        
+    Returns
+    -------
+    bytes
+        The watermarked PDF
+    """
     m = get_method(method)
     return m.add_watermark(pdf=pdf, secret=secret, key=key, position=position)
+
 
 def is_watermarking_applicable(
     method: str | WatermarkingMethod,
     pdf: PdfSource,
     position: str | None = None,
-) -> bytes:
-    """Apply a watermark using the specified method and return new PDF bytes."""
+) -> bool:
+    """Check if a watermarking method is applicable to a PDF.
+    
+    Parameters
+    ----------
+    method : str or WatermarkingMethod
+        The watermarking method to check
+    pdf : PdfSource
+        The source PDF
+    position : str, optional
+        Position hint for the watermark
+        
+    Returns
+    -------
+    bool
+        True if the method can be applied to this PDF
+    """
     m = get_method(method)
     return m.is_watermark_applicable(pdf=pdf, position=position)
 
 
 def read_watermark(method: str | WatermarkingMethod, pdf: PdfSource, key: str) -> str:
-    """Recover a secret from ``pdf`` using the specified method."""
+    """Recover a secret from ``pdf`` using the specified method.
+    
+    Parameters
+    ----------
+    method : str or WatermarkingMethod
+        The watermarking method that was used
+    pdf : PdfSource
+        The watermarked PDF
+    key : str
+        The key for decryption/authentication
+        
+    Returns
+    -------
+    str
+        The recovered secret
+    """
     m = get_method(method)
     return m.read_secret(pdf=pdf, key=key)
 
@@ -249,4 +332,3 @@ __all__ = [
     "explore_pdf",
     "is_watermarking_applicable"
 ]
-
