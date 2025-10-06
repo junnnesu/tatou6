@@ -115,9 +115,51 @@ def create_app():
     
     @app.route("/<path:filename>")
     def static_files(filename):
-        # Validate filename to prevent path traversal
+        # 修复CWE-22: 限制可访问的静态文件类型，防止flag文件泄漏
+        allowed_extensions = {'.html', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg'}
+        allowed_files = {'index.html', 'login.html', 'signup.html', 'documents.html', 'style.css'}
+        
+        # 1. 检查路径长度
+        if len(filename) > 255:
+            return jsonify({"error": "filename too long"}), 400
+        
+        # 2. 检查危险字符
+        if any(char in filename for char in ['..', '~', '$', '`', '|', '&', ';']):
+            return jsonify({"error": "invalid characters in filename"}), 400
+        
+        # 3. 规范化路径
+        try:
+            file_path = Path(filename).resolve()
+        except Exception:
+            return jsonify({"error": "invalid path"}), 400
+        
+        # 4. 检查文件扩展名和名称
+        if file_path.suffix.lower() not in allowed_extensions:
+            return jsonify({"error": "file type not allowed"}), 403
+        
+        if file_path.name not in allowed_files:
+            return jsonify({"error": "file not found"}), 404
+        
+        # 5. 防止访问flag文件
+        if 'flag' in filename.lower():
+            return jsonify({"error": "file not found"}), 404
+        
+        # 6. 检查是否为符号链接
+        try:
+            if file_path.is_symlink():
+                return jsonify({"error": "symbolic links not allowed"}), 403
+        except Exception:
+            return jsonify({"error": "file not found"}), 404
+        
+        # 7. 使用secure_filename进行最终清理
         filename = secure_filename(filename)
-        return app.send_static_file(filename)
+        if not filename:
+            return jsonify({"error": "invalid filename"}), 400
+        
+        try:
+            return app.send_static_file(filename)
+        except FileNotFoundError:
+            return jsonify({"error": "file not found"}), 404
 
     @app.route("/")
     def home():
