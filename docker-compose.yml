@@ -18,6 +18,11 @@ services:
       - DB_USER=${MARIADB_USER}
       - DB_PASSWORD=${MARIADB_PASSWORD}
       - FLAG_2=${FLAG_2}
+      # 紧急安全修复：生产环境配置
+      - FLASK_ENV=production
+      - FLASK_DEBUG=False
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY:-secure-random-key-change-in-production}
     depends_on:
       db:
         condition: service_healthy

@@ -140,8 +140,8 @@ def create_app():
         if file_path.name not in allowed_files:
             return jsonify({"error": "file not found"}), 404
         
-        # 5. 防止访问flag文件
-        if 'flag' in filename.lower():
+        # 5. 防止访问flag文件 - 紧急加强保护
+        if any(keyword in filename.lower() for keyword in ['flag', 'secret', 'password', 'key', 'token', 'credential']):
             return jsonify({"error": "file not found"}), 404
         
         # 6. 检查是否为符号链接
@@ -185,9 +185,20 @@ def create_app():
         if not email or not login or not password:
             return jsonify({"error": "email, login, and password are required"}), 400
 
-        # Validate login to prevent injection attacks
-        if not login.replace("_", "").replace("-", "").isalnum():
-            return jsonify({"error": "login must contain only alphanumeric characters, underscores, and hyphens"}), 400
+        # Validate login to prevent injection attacks - 修复：允许Mr_Important用户注册
+        # 特殊处理：允许Mr_Important用户注册
+        if login.lower() in ['mr_important', 'mrimportant', 'mr-important']:
+            # 允许Mr_Important用户注册，但进行基本安全检查
+            if any(char in login for char in [' ', '\t', '\n', '\r', ';', '&', '|', '`', '$', '(', ')', '[', ']', '{', '}', '<', '>', '?', '!', '@', '#', '%', '^', '*', '+', '=', '~', '\\', '/', ':', '"', "'"]):
+                return jsonify({"error": "login contains invalid characters"}), 400
+        else:
+            # 其他用户的标准验证
+            if not login.replace("_", "").replace("-", "").isalnum():
+                return jsonify({"error": "login must contain only alphanumeric characters, underscores, and hyphens"}), 400
+            
+            # 额外检查：防止危险字符
+            if any(char in login for char in [' ', '\t', '\n', '\r', ';', '&', '|', '`', '$', '(', ')', '[', ']', '{', '}', '<', '>', '?', '!', '@', '#', '%', '^', '*', '+', '=', '~', '\\', '/', ':', '"', "'"]):
+                return jsonify({"error": "login contains invalid characters"}), 400
 
         hpw = generate_password_hash(password)
 
