@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir -e .
 COPY src /app/src
 COPY flag /app/flag
 COPY entrypoint.sh /app/entrypoint.sh
+
+# 修复flag文件权限保护 - 设置为root-only可读
+RUN chown root:root /app/flag && chmod 600 /app/flag
+
 RUN pip install --no-cache-dir -e .
 
 EXPOSE 5000
