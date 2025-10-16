@@ -267,6 +267,24 @@ def create_app():
         fname = secure_filename(file.filename)
         if not fname:
             return jsonify({"error": "invalid filename"}), 400
+        
+        # file extension validation
+        if not fname.lower().endswith('.pdf'):
+            return jsonify({"error": "only PDF files are allowed"}), 400
+
+        # MIME type validation
+        allowed_mime_types = ['application/pdf', 'application/x-pdf']
+        if file.content_type not in allowed_mime_types:
+            return jsonify({"error": f"invalid file type: {file.content_type}, must be PDF"}), 400
+        
+        # file content validation (basic check for PDF header)
+        file_header = file.stream.read(5)
+        file.stream.seek(0)  # reset stream position
+
+        if not file_header.startswith(b'%PDF-'):
+            return jsonify({"error": "file is not a valid PDF (invalid magic number)"}), 400
+
+
 
         user_dir = app.config["STORAGE_DIR"] / "files" / secure_filename(g.user["login"])
         user_dir.mkdir(parents=True, exist_ok=True)
