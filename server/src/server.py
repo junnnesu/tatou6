@@ -47,6 +47,16 @@ def create_app():
     app.config["DB_NAME"] = os.environ.get("DB_NAME", "tatou")
 
     app.config["STORAGE_DIR"].mkdir(parents=True, exist_ok=True)
+    
+    # --- Initialize security monitoring ---
+    from security_log_config import setup_security_logging
+    from security_monitor import init_security_monitoring
+    
+    # Setup security logging
+    app.security_logger = setup_security_logging()
+    
+    # Initialize security monitoring middleware
+    init_security_monitoring(app)
 
     # --- DB engine only (no Table metadata) ---
     def db_url() -> str:
@@ -115,43 +125,43 @@ def create_app():
     
     @app.route("/<path:filename>")
     def static_files(filename):
-        # 修复CWE-22: 限制可访问的静态文件类型，防止flag文件泄漏
+        # Fix CWE-22: Restrict accessible static file types to prevent flag file leakage
         allowed_extensions = {'.html', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg'}
         allowed_files = {'index.html', 'login.html', 'signup.html', 'documents.html', 'style.css'}
         
-        # 1. 检查路径长度
+        # 1. Check path length
         if len(filename) > 255:
             return jsonify({"error": "filename too long"}), 400
         
-        # 2. 检查危险字符
+        # 2. Check for dangerous characters
         if any(char in filename for char in ['..', '~', '$', '`', '|', '&', ';']):
             return jsonify({"error": "invalid characters in filename"}), 400
         
-        # 3. 规范化路径
+        # 3. Normalize path
         try:
             file_path = Path(filename).resolve()
         except Exception:
             return jsonify({"error": "invalid path"}), 400
         
-        # 4. 检查文件扩展名和名称
+        # 4. Check file extension and name
         if file_path.suffix.lower() not in allowed_extensions:
             return jsonify({"error": "file type not allowed"}), 403
         
         if file_path.name not in allowed_files:
             return jsonify({"error": "file not found"}), 404
         
-        # 5. 防止访问flag文件 - 紧急加强保护
+        # 5. Prevent flag file access - emergency protection
         if any(keyword in filename.lower() for keyword in ['flag', 'secret', 'password', 'key', 'token', 'credential']):
             return jsonify({"error": "file not found"}), 404
         
-        # 6. 检查是否为符号链接
+        # 6. Check for symbolic links
         try:
             if file_path.is_symlink():
                 return jsonify({"error": "symbolic links not allowed"}), 403
         except Exception:
             return jsonify({"error": "file not found"}), 404
         
-        # 7. 使用secure_filename进行最终清理
+        # 7. Final cleanup using secure_filename
         filename = secure_filename(filename)
         if not filename:
             return jsonify({"error": "invalid filename"}), 400
@@ -185,18 +195,18 @@ def create_app():
         if not email or not login or not password:
             return jsonify({"error": "email, login, and password are required"}), 400
 
-        # Validate login to prevent injection attacks - 修复：允许Mr_Important用户注册
-        # 特殊处理：允许Mr_Important用户注册
+        # Validate login to prevent injection attacks - Fix: Allow Mr_Important user registration
+        # Special handling: Allow Mr_Important user registration
         if login.lower() in ['mr_important', 'mrimportant', 'mr-important']:
-            # 允许Mr_Important用户注册，但进行基本安全检查
+            # Allow Mr_Important user registration but perform basic security checks
             if any(char in login for char in [' ', '\t', '\n', '\r', ';', '&', '|', '`', '$', '(', ')', '[', ']', '{', '}', '<', '>', '?', '!', '@', '#', '%', '^', '*', '+', '=', '~', '\\', '/', ':', '"', "'"]):
                 return jsonify({"error": "login contains invalid characters"}), 400
         else:
-            # 其他用户的标准验证
+            # Standard validation for other users
             if not login.replace("_", "").replace("-", "").isalnum():
                 return jsonify({"error": "login must contain only alphanumeric characters, underscores, and hyphens"}), 400
             
-            # 额外检查：防止危险字符
+            # Additional check: prevent dangerous characters
             if any(char in login for char in [' ', '\t', '\n', '\r', ';', '&', '|', '`', '$', '(', ')', '[', ']', '{', '}', '<', '>', '?', '!', '@', '#', '%', '^', '*', '+', '=', '~', '\\', '/', ':', '"', "'"]):
                 return jsonify({"error": "login contains invalid characters"}), 400
 
