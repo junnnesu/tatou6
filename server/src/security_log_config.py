@@ -5,7 +5,8 @@ from pathlib import Path
 
 def setup_security_logging():
     """Setup security logging configuration"""
-    log_dir = Path("/app/logs")
+    # Use current working directory for logs to avoid permission issues
+    log_dir = Path("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     
     # Configure security logger
