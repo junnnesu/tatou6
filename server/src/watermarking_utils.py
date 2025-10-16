@@ -48,12 +48,26 @@ try:
 except ImportError:
     has_text_overlay = False
 
-# Import the unsafe Yuwei Cao method if available
+# Import Yuwei Cao method if available
 try:
     from yuwei_cao_watermark import YuweiCaoWatermark
     has_yuwei_method = True
 except ImportError:
     has_yuwei_method = False
+
+# Import Yuyuan Su method if available
+try:
+    from yuyuan_watermarking import WatermarkSafe
+    has_yuyuan_method = True
+except ImportError:
+    has_yuyuan_method = False
+
+# Import Daowei Fu method if available
+try:
+    from  daowei_fu_watermark import SimpleTextWatermark
+    has_daowei_method = True
+except ImportError:
+    has_daowei_method = False
 
 # --------------------
 # Method registry
@@ -71,6 +85,14 @@ if has_text_overlay:
 # Add Yuwei Cao method if available
 if has_yuwei_method:
     METHODS[YuweiCaoWatermark.name] = YuweiCaoWatermark()
+
+# Add Yuyuan Su method if available
+if has_yuyuan_method:
+    METHODS[WatermarkSafe.name] = WatermarkSafe()
+
+# Add Daowei Fu method if available
+if has_daowei_method:
+    METHODS[SimpleTextWatermark.name] = SimpleTextWatermark()
 
 """Registry of available watermarking methods.
 
