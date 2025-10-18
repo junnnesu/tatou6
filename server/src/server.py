@@ -893,8 +893,7 @@ def create_app():
             # Use Group 6's private key as server private key
             server_priv_path = app.config["STORAGE_DIR"] / "pki" / "g6.asc"
             
-            # For server public key, we need to extract it from the private key
-            # Or use Group_06.asc if that's our public key
+            # Server public key
             server_pub_path = app.config["STORAGE_DIR"] / "pki" / "Group_06.asc"
             
             # Client public keys directory
@@ -905,66 +904,27 @@ def create_app():
                 return None
                 
             if not server_pub_path.exists():
-                app.logger.warning(f"Server public key not found at {server_pub_path}, will extract from private")
-                # Extract public key from private key using GPG
-                import subprocess
-                try:
-                    result = subprocess.run(
-                        ["gpg", "--import", str(server_priv_path)],
-                        capture_output=True,
-                        text=True
-                    )
-                    # Export the public key
-                    pub_result = subprocess.run(
-                        ["gpg", "--armor", "--export", "Group 6"],
-                        capture_output=True,
-                        text=True
-                    )
-                    if pub_result.stdout:
-                        server_pub_path = app.config["STORAGE_DIR"] / "pki" / "server_pub.asc"
-                        server_pub_path.write_text(pub_result.stdout)
-                except Exception as e:
-                    app.logger.error(f"Failed to extract public key: {e}")
+                app.logger.error(f"Server public key not found at {server_pub_path}")
+                return None
             
-            # Initialize identity manager with client public keys
-            identity_manager = IdentityManager()
+            # Initialize identity manager with required parameters
+            identity_manager = IdentityManager(
+                client_keys_dir=str(client_keys_dir),
+                server_public_key_path=str(server_pub_path),
+                server_private_key_path=str(server_priv_path)
+            )
             
-            # Load all group public keys
-            for key_file in client_keys_dir.glob("Group_*.asc"):
-                # Extract group number from filename
-                group_name = key_file.stem.replace("_", " ")  # "Group_06" -> "Group 06"
-                
-                # Also handle different naming formats
-                if group_name == "Group 06":
-                    # Add variations for our own group
-                    identity_variants = ["Group 6", "Group 06", "Group_6", "Group_06"]
-                else:
-                    # For other groups, be flexible with naming
-                    group_num = key_file.stem.split("_")[1].lstrip("0")  # Remove leading zeros
-                    identity_variants = [
-                        f"Group {group_num}",
-                        f"Group {key_file.stem.split('_')[1]}",  # With leading zeros
-                        key_file.stem.replace("_", " ")
-                    ]
-                
-                with open(key_file, 'r') as f:
-                    public_key = f.read()
-                    for variant in identity_variants:
-                        identity_manager.add_identity(variant, public_key)
-                        app.logger.info(f"Added identity: {variant}")
+            app.logger.info(f"IdentityManager initialized with:")
+            app.logger.info(f"  - Client keys dir: {client_keys_dir}")
+            app.logger.info(f"  - Server public key: {server_pub_path}")
+            app.logger.info(f"  - Server private key: {server_priv_path}")
             
             # Read server keys
             with open(server_priv_path, 'r') as f:
                 server_priv = f.read()
             
-            # Try to read public key, or use the one we extracted
-            if server_pub_path.exists():
-                with open(server_pub_path, 'r') as f:
-                    server_pub = f.read()
-            else:
-                # If we still don't have a public key, use the Group_06.asc
-                with open(app.config["STORAGE_DIR"] / "pki" / "Group_06.asc", 'r') as f:
-                    server_pub = f.read()
+            with open(server_pub_path, 'r') as f:
+                server_pub = f.read()
             
             # Initialize RMAP handler
             rmap_handler = RMAP(server_priv, server_pub, identity_manager)
