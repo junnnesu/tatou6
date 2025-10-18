@@ -892,9 +892,9 @@ def create_app():
         try:
             pki_dir = app.config["STORAGE_DIR"] / "pki"
             
-            # Group 6的私钥（server使用）
+            # Group 6's private key
             server_priv_path = pki_dir / "g6.asc"
-            # Group 6的公钥
+            # Group 6's public key
             server_pub_path = pki_dir / "Group_06.asc"
             
             if not server_priv_path.exists():
@@ -907,22 +907,22 @@ def create_app():
             
             app.logger.info(f"Initializing RMAP with keys from {pki_dir}")
             
-            # 初始化IdentityManager
+            # Initialize IdentityManager
             identity_manager = IdentityManager(
                 client_keys_dir=str(pki_dir),
                 server_public_key_path=str(server_pub_path),
                 server_private_key_path=str(server_priv_path),
-                server_private_key_passphrase=None  # 如果密钥有密码保护，在这里提供
+                server_private_key_passphrase=None
             )
             
-            # 读取服务器密钥用于RMAP
+            # Read the server key for RMAP
             with open(server_priv_path, 'r') as f:
                 server_priv = f.read()
             
             with open(server_pub_path, 'r') as f:
                 server_pub = f.read()
             
-            # 初始化RMAP处理器
+            # Initialize RMAP handler
             rmap_handler = RMAP(identity_manager)
             
             app.logger.info("RMAP initialized successfully")
@@ -952,15 +952,15 @@ def create_app():
             if not payload or "payload" not in payload:
                 return jsonify({"error": "Missing payload"}), 400
             
-            # 直接传递整个payload给handle_message1
+            # Directly pass the entire payload to handle_message1
             response = app.rmap_handler.handle_message1(payload)
             
-            # RMAP库返回的response已经是正确格式
+            # The response returned by the RMAP library is already in the correct format
             if "error" in response:
                 app.logger.error(f"RMAP error: {response['error']}")
                 return jsonify(response), 401
             
-            # 直接返回response（包含payload字段）
+            # Return the response directly (including the payload field)
             return jsonify(response), 200
             
         except Exception as e:
@@ -982,7 +982,7 @@ def create_app():
             if not payload or "payload" not in payload:
                 return jsonify({"error": "Missing payload"}), 400
             
-            # 使用RMAP库处理Message 2
+            # Use the RMAP library to process Message 2
             response = app.rmap_handler.handle_message2(payload)
             
             if "error" in response:
@@ -996,7 +996,7 @@ def create_app():
             link_hex = response["result"]
             app.logger.info(f"RMAP generated link: {link_hex}")
             
-            # 从link_hex反推identity
+            # Deducing identity from link_hex
             identity = "Unknown"
             try:
                 combined = int(link_hex, 16)
@@ -1012,10 +1012,10 @@ def create_app():
             except Exception as e:
                 app.logger.warning(f"Could not determine identity: {e}")
             
-            # 生成水印PDF
+            # Generate Watermark PDF
             try:
                 with get_engine().begin() as conn:
-                    # 检查是否已存在
+                    
                     existing = conn.execute(
                         text("SELECT path FROM Versions WHERE link = :link"),
                         {"link": link_hex}
@@ -1025,14 +1025,14 @@ def create_app():
                         app.logger.info(f"Watermark already exists for {link_hex}")
                         return jsonify({"result": link_hex}), 200
                     
-                    # 获取源PDF
-                    source_pdf = app.config["STORAGE_DIR"] / "rmap_watermark_pdf" / "rmap.pdf"
+                    # Get the source PDF
+                    source_pdf = app.config["STORAGE_DIR"] / "rmap_watermark_pdf" / "group_06_rmap.pdf"
                     
                     if not source_pdf.exists():
                         app.logger.error(f"Source PDF not found: {source_pdf}")
                         return jsonify({"error": "Source document not available"}), 404
                     
-                    # 生成水印
+                    # Generate watermark
                     secret = f"RMAP-{identity}-{link_hex[:8]}"
                     key = app.config.get("SECRET_KEY", "default-rmap-key")
                     
@@ -1046,7 +1046,7 @@ def create_app():
                         position="all"
                     )
                     
-                    # 保存水印PDF
+                    # Save watermarked PDF
                     wm_dir = app.config["STORAGE_DIR"] / "rmap_watermarks"
                     wm_dir.mkdir(parents=True, exist_ok=True)
                     wm_path = wm_dir / f"rmap_{link_hex}.pdf"
@@ -1056,7 +1056,7 @@ def create_app():
                     
                     app.logger.info(f"Watermarked PDF saved: {wm_path} ({len(wm_bytes)} bytes)")
                     
-                    # 保存到数据库
+                    # Save to database
                     doc_row = conn.execute(
                         text("SELECT id FROM Documents ORDER BY id DESC LIMIT 1")
                     ).first()
@@ -1086,7 +1086,7 @@ def create_app():
                 app.logger.error(f"Error generating watermark: {e}")
                 import traceback
                 app.logger.error(traceback.format_exc())
-                # 继续返回result，即使水印生成失败
+
             
             return jsonify({"result": link_hex}), 200
             
