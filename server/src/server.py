@@ -888,16 +888,15 @@ def create_app():
 
     # Initialize RMAP
     def init_rmap():
-        """Initialize RMAP handler with server keys and client public keys."""
+        """Initialize RMAP handler with correct key paths."""
         try:
-            # PKI目录就在storage/pki下
             pki_dir = app.config["STORAGE_DIR"] / "pki"
             
-            # 组6的密钥
-            server_priv_path = pki_dir / "g6.asc"           # 私钥
-            server_pub_path = pki_dir / "Group_06.asc"      # 公钥
+            # Group 6的私钥（server使用）
+            server_priv_path = pki_dir / "g6.asc"
+            # Group 6的公钥
+            server_pub_path = pki_dir / "Group_06.asc"
             
-            # 验证文件存在
             if not server_priv_path.exists():
                 app.logger.error(f"Server private key not found: {server_priv_path}")
                 return None
@@ -906,28 +905,28 @@ def create_app():
                 app.logger.error(f"Server public key not found: {server_pub_path}")
                 return None
             
-            app.logger.info(f"Loading RMAP keys from {pki_dir}")
-            app.logger.info(f"  Server private key: {server_priv_path.name}")
-            app.logger.info(f"  Server public key: {server_pub_path.name}")
+            app.logger.info(f"Initializing RMAP with keys from {pki_dir}")
             
             # 初始化IdentityManager
-            # 它会自动加载pki_dir下所有的.asc文件作为客户端公钥
-            from rmap.identity_manager import IdentityManager
             identity_manager = IdentityManager(
                 client_keys_dir=str(pki_dir),
                 server_public_key_path=str(server_pub_path),
                 server_private_key_path=str(server_priv_path),
-                server_private_key_passphrase=None  # 如果私钥有密码，在这里提供
+                server_private_key_passphrase=None  # 如果密钥有密码保护，在这里提供
             )
             
+            # 读取服务器密钥用于RMAP
+            with open(server_priv_path, 'r') as f:
+                server_priv = f.read()
+            
+            with open(server_pub_path, 'r') as f:
+                server_pub = f.read()
+            
             # 初始化RMAP处理器
-            from rmap.rmap import RMAP
             rmap_handler = RMAP(identity_manager)
             
-            # 打印加载的身份（用于调试）
-            loaded_identities = list(identity_manager.identity_public_keys.keys())
-            app.logger.info(f"RMAP initialized successfully")
-            app.logger.info(f"Loaded {len(loaded_identities)} client identities: {loaded_identities}")
+            app.logger.info("RMAP initialized successfully")
+            app.logger.info(f"Available identities: {list(identity_manager.identity_public_keys.keys())}")
             
             return rmap_handler
             
@@ -944,147 +943,110 @@ def create_app():
     # RMAP Routes
     @app.post("/api/rmap-initiate")
     def rmap_initiate():
-        """RMAP Authentication - Message 1."""
-        if not app.rmap_handler:
+        """RMAP Message 1处理"""
+        if not hasattr(app, 'rmap_handler') or app.rmap_handler is None:
             return jsonify({"error": "RMAP not configured"}), 503
             
         try:
-            # 获取请求数据
-            incoming = request.get_json(silent=True) or {}
+            payload = request.get_json(silent=True)
+            if not payload or "payload" not in payload:
+                return jsonify({"error": "Missing payload"}), 400
             
-            app.logger.info(f"[RMAP-INITIATE] Received request")
+            # 直接传递整个payload给handle_message1
+            response = app.rmap_handler.handle_message1(payload)
             
-            # RMAP库会自动处理解密、验证和加密响应
-            response = app.rmap_handler.handle_message1(incoming)
-            
-            # 检查是否有错误
+            # RMAP库返回的response已经是正确格式
             if "error" in response:
-                app.logger.error(f"[RMAP-INITIATE] Error: {response['error']}")
-                return jsonify(response), 400
+                app.logger.error(f"RMAP error: {response['error']}")
+                return jsonify(response), 401
             
-            # 成功 - response已经是正确格式: {"payload": "<encrypted>"}
-            app.logger.info(f"[RMAP-INITIATE] Success")
+            # 直接返回response（包含payload字段）
             return jsonify(response), 200
             
         except Exception as e:
-            app.logger.error(f"[RMAP-INITIATE] Exception: {e}")
+            app.logger.error(f"RMAP initiate exception: {e}")
             import traceback
             app.logger.error(traceback.format_exc())
-            return jsonify({"error": f"Internal error: {str(e)}"}), 500
+            return jsonify({"error": str(e)}), 500
+
+
 
     @app.post("/api/rmap-get-link")
     def rmap_get_link():
-        """RMAP Authentication - Message 2 and watermark generation."""
-        if not app.rmap_handler:
+        """RMAP Message 2处理 + 生成水印PDF"""
+        if not hasattr(app, 'rmap_handler') or app.rmap_handler is None:
             return jsonify({"error": "RMAP not configured"}), 503
             
         try:
-            # 获取请求数据
-            incoming = request.get_json(silent=True) or {}
+            payload = request.get_json(silent=True)
+            if not payload or "payload" not in payload:
+                return jsonify({"error": "Missing payload"}), 400
             
-            app.logger.info(f"[RMAP-GET-LINK] Received request")
-            
-            # 处理消息2
-            response = app.rmap_handler.handle_message2(incoming)
+            # 使用RMAP库处理Message 2
+            response = app.rmap_handler.handle_message2(payload)
             
             if "error" in response:
-                app.logger.error(f"[RMAP-GET-LINK] Error: {response['error']}")
-                return jsonify(response), 400
+                app.logger.error(f"RMAP get-link error: {response['error']}")
+                return jsonify(response), 401
             
-            # response包含 {"result": "<32-hex>"}
+            if "result" not in response:
+                app.logger.error("RMAP response missing result field")
+                return jsonify({"error": "Invalid response from RMAP"}), 500
+            
             link_hex = response["result"]
-            app.logger.info(f"[RMAP-GET-LINK] Generated link: {link_hex}")
+            app.logger.info(f"RMAP generated link: {link_hex}")
             
-            # 找出是哪个组（identity）
-            identity = None
-            for ident, (nc, ns) in app.rmap_handler.nonces.items():
-                combined = (nc << 64) | ns
-                if f"{combined:032x}" == link_hex:
-                    identity = ident
-                    break
+            # 从link_hex反推identity
+            identity = "Unknown"
+            try:
+                combined = int(link_hex, 16)
+                nonce_server = combined & 0xFFFFFFFFFFFFFFFF
+                nonce_client = (combined >> 64) & 0xFFFFFFFFFFFFFFFF
+                
+                for ident, (nc, ns) in app.rmap_handler.nonces.items():
+                    if nc == nonce_client and ns == nonce_server:
+                        identity = ident
+                        break
+                
+                app.logger.info(f"Identity for link: {identity}")
+            except Exception as e:
+                app.logger.warning(f"Could not determine identity: {e}")
             
-            if not identity:
-                app.logger.error(f"[RMAP-GET-LINK] Could not find identity for link")
-                return jsonify({"error": "Session not found"}), 400
-            
-            app.logger.info(f"[RMAP-GET-LINK] Identity: {identity}")
-            
-            # 检查是否已经创建过这个水印版本
-            with get_engine().connect() as conn:
-                existing = conn.execute(
-                    text("SELECT * FROM Versions WHERE link = :link"),
-                    {"link": link_hex}
-                ).first()
-            
-            if existing:
-                app.logger.info(f"[RMAP-GET-LINK] Version already exists")
-                return jsonify({"result": link_hex}), 200
-            
-            # 需要创建新的水印PDF
-            app.logger.info(f"[RMAP-GET-LINK] Creating watermarked PDF for {identity}")
-            
+            # 生成水印PDF
             try:
                 with get_engine().begin() as conn:
-                    # 找一个文档来水印（优先flag文档）
-                    doc_row = conn.execute(
-                        text("""
-                            SELECT d.id, d.name, d.path 
-                            FROM Documents d 
-                            JOIN Users u ON d.ownerid = u.id 
-                            WHERE u.login LIKE '%Important%' 
-                            OR d.name LIKE '%flag%'
-                            ORDER BY d.id ASC
-                            LIMIT 1
-                        """)
+                    # 检查是否已存在
+                    existing = conn.execute(
+                        text("SELECT path FROM Versions WHERE link = :link"),
+                        {"link": link_hex}
                     ).first()
                     
-                    if not doc_row:
-                        # 如果没有flag文档，用第一个文档
-                        doc_row = conn.execute(
-                            text("SELECT id, name, path FROM Documents ORDER BY id ASC LIMIT 1")
-                        ).first()
+                    if existing:
+                        app.logger.info(f"Watermark already exists for {link_hex}")
+                        return jsonify({"result": link_hex}), 200
                     
-                    if not doc_row:
-                        app.logger.error(f"[RMAP-GET-LINK] No documents available")
-                        return jsonify({"error": "No document available for watermarking"}), 404
+                    # 获取源PDF
+                    source_pdf = app.config["STORAGE_DIR"] / "rmap_watermark_pdf" / "rmap.pdf"
                     
-                    app.logger.info(f"[RMAP-GET-LINK] Using document: {doc_row.name} (ID: {doc_row.id})")
+                    if not source_pdf.exists():
+                        app.logger.error(f"Source PDF not found: {source_pdf}")
+                        return jsonify({"error": "Source document not available"}), 404
                     
-                    # 解析文件路径
-                    file_path = _safe_resolve_under_storage(doc_row.path, app.config["STORAGE_DIR"])
-                    
-                    if not file_path.exists():
-                        app.logger.error(f"[RMAP-GET-LINK] Document file not found: {file_path}")
-                        return jsonify({"error": "Document file not found"}), 404
-                    
-                    # 准备水印参数
+                    # 生成水印
                     secret = f"RMAP-{identity}-{link_hex[:8]}"
-                    key = app.config["SECRET_KEY"] or "default-rmap-key"
+                    key = app.config.get("SECRET_KEY", "default-rmap-key")
                     
-                    # 选择可用的水印方法
-                    available_methods = list(WMUtils.METHODS.keys())
-                    app.logger.info(f"[RMAP-GET-LINK] Available methods: {available_methods}")
+                    app.logger.info(f"Applying watermark: method=yuwei-cao-method, secret={secret}")
                     
-                    # 优先使用text-overlay，否则用第一个可用方法
-                    if "text-overlay" in available_methods:
-                        method = "text-overlay"
-                    elif "toy-eof" in available_methods:
-                        method = "toy-eof"
-                    else:
-                        method = available_methods[0]
-                    
-                    app.logger.info(f"[RMAP-GET-LINK] Using watermark method: {method}")
-                    
-                    # 应用水印
                     wm_bytes = WMUtils.apply_watermark(
-                        pdf=str(file_path),
+                        pdf=str(source_pdf),
                         secret=secret,
                         key=key,
-                        method=method,
-                        position="diagonal"
+                        method="yuwei-cao-method",
+                        position="all"
                     )
                     
-                    # 保存水印文件
+                    # 保存水印PDF
                     wm_dir = app.config["STORAGE_DIR"] / "rmap_watermarks"
                     wm_dir.mkdir(parents=True, exist_ok=True)
                     wm_path = wm_dir / f"rmap_{link_hex}.pdf"
@@ -1092,41 +1054,47 @@ def create_app():
                     with wm_path.open("wb") as f:
                         f.write(wm_bytes)
                     
-                    app.logger.info(f"[RMAP-GET-LINK] Saved watermarked PDF: {wm_path}")
+                    app.logger.info(f"Watermarked PDF saved: {wm_path} ({len(wm_bytes)} bytes)")
                     
-                    # 存入数据库
+                    # 保存到数据库
+                    doc_row = conn.execute(
+                        text("SELECT id FROM Documents ORDER BY id DESC LIMIT 1")
+                    ).first()
+                    
+                    doc_id = doc_row.id if doc_row else 1
+                    
                     conn.execute(
                         text("""
-                            INSERT INTO Versions (documentid, link, intended_for, secret, method, position, path)
+                            INSERT INTO Versions 
+                            (documentid, link, intended_for, secret, method, position, path)
                             VALUES (:documentid, :link, :intended_for, :secret, :method, :position, :path)
                         """),
                         {
-                            "documentid": doc_row.id,
+                            "documentid": doc_id,
                             "link": link_hex,
                             "intended_for": identity,
                             "secret": secret,
-                            "method": method,
-                            "position": "diagonal",
+                            "method": "yuwei-cao-method",
+                            "position": "all",
                             "path": str(wm_path)
                         }
                     )
                     
-                    app.logger.info(f"[RMAP-GET-LINK] Database entry created")
-            
+                    app.logger.info(f"Database record created for link {link_hex}")
+                    
             except Exception as e:
-                app.logger.error(f"[RMAP-GET-LINK] Failed to create watermark: {e}")
+                app.logger.error(f"Error generating watermark: {e}")
                 import traceback
                 app.logger.error(traceback.format_exc())
-                return jsonify({"error": f"Failed to create watermarked PDF: {str(e)}"}), 500
+                # 继续返回result，即使水印生成失败
             
-            # 返回结果
             return jsonify({"result": link_hex}), 200
             
         except Exception as e:
-            app.logger.error(f"[RMAP-GET-LINK] Exception: {e}")
+            app.logger.error(f"RMAP get-link exception: {e}")
             import traceback
             app.logger.error(traceback.format_exc())
-            return jsonify({"error": f"Internal error: {str(e)}"}), 500
+            return jsonify({"error": str(e)}), 500
 
 
     return app

@@ -8,7 +8,7 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - user-files:/app/storage
+      - ./server/storage:/app/storage
       - ./server/storage/pki:/app/storage/pki:ro
     environment:
       - PYTHONUNBUFFERED=1
