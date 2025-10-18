@@ -16,10 +16,6 @@ COPY pyproject.toml /app/pyproject.toml
 # Install runtime dependencies
 RUN pip install --no-cache-dir -e .
 
-# 创建 RMAP 需要的目录结构
-RUN mkdir -p /app/storage/pki /app/storage/rmap_watermarks
-
-RUN pip install --no-cache-dir -e .
 
 # Copy sources after dependencies installation
 COPY src /app/src

@@ -890,46 +890,45 @@ def create_app():
     def init_rmap():
         """Initialize RMAP handler with server keys and client public keys."""
         try:
-            # Use Group 6's private key as server private key
-            server_priv_path = app.config["STORAGE_DIR"] / "pki" / "g6.asc"
+            # PKI目录就在storage/pki下
+            pki_dir = app.config["STORAGE_DIR"] / "pki"
             
-            # Server public key
-            server_pub_path = app.config["STORAGE_DIR"] / "pki" / "Group_06.asc"
+            # 组6的密钥
+            server_priv_path = pki_dir / "g6.asc"           # 私钥
+            server_pub_path = pki_dir / "Group_06.asc"      # 公钥
             
-            # Client public keys directory
-            client_keys_dir = app.config["STORAGE_DIR"] / "pki"
-            
+            # 验证文件存在
             if not server_priv_path.exists():
-                app.logger.error(f"Server private key not found at {server_priv_path}")
+                app.logger.error(f"Server private key not found: {server_priv_path}")
                 return None
                 
             if not server_pub_path.exists():
-                app.logger.error(f"Server public key not found at {server_pub_path}")
+                app.logger.error(f"Server public key not found: {server_pub_path}")
                 return None
             
-            # Initialize identity manager with required parameters
+            app.logger.info(f"Loading RMAP keys from {pki_dir}")
+            app.logger.info(f"  Server private key: {server_priv_path.name}")
+            app.logger.info(f"  Server public key: {server_pub_path.name}")
+            
+            # 初始化IdentityManager
+            # 它会自动加载pki_dir下所有的.asc文件作为客户端公钥
+            from rmap.identity_manager import IdentityManager
             identity_manager = IdentityManager(
-                client_keys_dir=str(client_keys_dir),
+                client_keys_dir=str(pki_dir),
                 server_public_key_path=str(server_pub_path),
-                server_private_key_path=str(server_priv_path)
+                server_private_key_path=str(server_priv_path),
+                server_private_key_passphrase=None  # 如果私钥有密码，在这里提供
             )
             
-            app.logger.info(f"IdentityManager initialized with:")
-            app.logger.info(f"  - Client keys dir: {client_keys_dir}")
-            app.logger.info(f"  - Server public key: {server_pub_path}")
-            app.logger.info(f"  - Server private key: {server_priv_path}")
+            # 初始化RMAP处理器
+            from rmap.rmap import RMAP
+            rmap_handler = RMAP(identity_manager)
             
-            # Read server keys
-            with open(server_priv_path, 'r') as f:
-                server_priv = f.read()
+            # 打印加载的身份（用于调试）
+            loaded_identities = list(identity_manager.identity_public_keys.keys())
+            app.logger.info(f"RMAP initialized successfully")
+            app.logger.info(f"Loaded {len(loaded_identities)} client identities: {loaded_identities}")
             
-            with open(server_pub_path, 'r') as f:
-                server_pub = f.read()
-            
-            # Initialize RMAP handler
-            rmap_handler = RMAP(server_priv, server_pub, identity_manager)
-            
-            app.logger.info("RMAP initialized successfully")
             return rmap_handler
             
         except Exception as e:
@@ -950,51 +949,28 @@ def create_app():
             return jsonify({"error": "RMAP not configured"}), 503
             
         try:
-            payload = request.get_json(silent=True) or {}
-            encrypted_payload = payload.get("payload")
+            # 获取请求数据
+            incoming = request.get_json(silent=True) or {}
             
-            if not encrypted_payload:
-                return jsonify({"error": "payload required"}), 400
+            app.logger.info(f"[RMAP-INITIATE] Received request")
             
-            # The payload should be base64-encoded ASCII-armored PGP
-            try:
-                # Decode base64
-                armored_message = base64.b64decode(encrypted_payload).decode('ascii')
-            except Exception as e:
-                app.logger.error(f"Failed to decode payload: {e}")
-                return jsonify({"error": "invalid base64 encoding"}), 400
+            # RMAP库会自动处理解密、验证和加密响应
+            response = app.rmap_handler.handle_message1(incoming)
             
-            # Process Message 1 using RMAP library
-            try:
-                response = app.rmap_handler.process_message_1(armored_message)
-            except Exception as e:
-                app.logger.error(f"RMAP process_message_1 failed: {e}")
-                return jsonify({"error": f"RMAP processing failed: {str(e)}"}), 500
+            # 检查是否有错误
+            if "error" in response:
+                app.logger.error(f"[RMAP-INITIATE] Error: {response['error']}")
+                return jsonify(response), 400
             
-            if response['success']:
-                # Store session info for Message 2
-                session_key = f"{response['identity']}:{response['nonce_client']}"
-                app.rmap_sessions[session_key] = {
-                    'identity': response['identity'],
-                    'nonce_client': response['nonce_client'],
-                    'nonce_server': response['nonce_server'],
-                    'timestamp': dt.datetime.utcnow()
-                }
-                
-                app.logger.info(f"RMAP session created for {response['identity']}")
-                
-                # Response should be ASCII-armored PGP, encode it to base64
-                response_payload = base64.b64encode(response['response'].encode('ascii')).decode('ascii')
-                return jsonify({"payload": response_payload}), 200
-            else:
-                app.logger.error(f"RMAP initiation failed: {response.get('error', 'Unknown error')}")
-                return jsonify({"error": response.get('error', 'RMAP initiation failed')}), 401
-                
+            # 成功 - response已经是正确格式: {"payload": "<encrypted>"}
+            app.logger.info(f"[RMAP-INITIATE] Success")
+            return jsonify(response), 200
+            
         except Exception as e:
-            app.logger.error(f"RMAP initiate error: {e}")
+            app.logger.error(f"[RMAP-INITIATE] Exception: {e}")
             import traceback
             app.logger.error(traceback.format_exc())
-            return jsonify({"error": "internal error processing RMAP"}), 500
+            return jsonify({"error": f"Internal error: {str(e)}"}), 500
 
     @app.post("/api/rmap-get-link")
     def rmap_get_link():
@@ -1003,162 +979,154 @@ def create_app():
             return jsonify({"error": "RMAP not configured"}), 503
             
         try:
-            payload = request.get_json(silent=True) or {}
-            encrypted_payload = payload.get("payload")
+            # 获取请求数据
+            incoming = request.get_json(silent=True) or {}
             
-            if not encrypted_payload:
-                return jsonify({"error": "payload required"}), 400
+            app.logger.info(f"[RMAP-GET-LINK] Received request")
             
-            # Decode base64 to get ASCII-armored message
-            try:
-                armored_message = base64.b64decode(encrypted_payload).decode('ascii')
-            except Exception:
-                return jsonify({"error": "invalid base64 encoding"}), 400
+            # 处理消息2
+            response = app.rmap_handler.handle_message2(incoming)
             
-            # Process Message 2 using RMAP library
-            try:
-                response = app.rmap_handler.process_message_2(armored_message)
-            except Exception as e:
-                app.logger.error(f"RMAP process_message_2 failed: {e}")
-                return jsonify({"error": f"RMAP processing failed: {str(e)}"}), 500
+            if "error" in response:
+                app.logger.error(f"[RMAP-GET-LINK] Error: {response['error']}")
+                return jsonify(response), 400
             
-            if not response['success']:
-                return jsonify({"error": response.get('error', 'RMAP verification failed')}), 401
+            # response包含 {"result": "<32-hex>"}
+            link_hex = response["result"]
+            app.logger.info(f"[RMAP-GET-LINK] Generated link: {link_hex}")
             
-            # Find the matching session
-            session_found = None
-            session_key = None
-            for sk, session_data in app.rmap_sessions.items():
-                if session_data['nonce_server'] == response['nonce_server']:
-                    session_found = session_data
-                    session_key = sk
+            # 找出是哪个组（identity）
+            identity = None
+            for ident, (nc, ns) in app.rmap_handler.nonces.items():
+                combined = (nc << 64) | ns
+                if f"{combined:032x}" == link_hex:
+                    identity = ident
                     break
             
-            if not session_found:
-                app.logger.error("No matching session found for nonce_server")
-                return jsonify({"error": "session not found"}), 401
+            if not identity:
+                app.logger.error(f"[RMAP-GET-LINK] Could not find identity for link")
+                return jsonify({"error": "Session not found"}), 400
             
-            # Clean up old sessions (older than 5 minutes)
-            cutoff_time = dt.datetime.utcnow() - dt.timedelta(minutes=5)
-            old_sessions = [k for k, v in app.rmap_sessions.items() 
-                          if v['timestamp'] < cutoff_time]
-            for k in old_sessions:
-                del app.rmap_sessions[k]
+            app.logger.info(f"[RMAP-GET-LINK] Identity: {identity}")
             
-            # Generate the link from concatenated nonces (as per spec)
-            # The link should be the concatenation of client and server nonces
-            link_hex = f"{session_found['nonce_client']:016x}{session_found['nonce_server']:016x}"
-            # Take first 32 hex chars as specified
-            link_hex = link_hex[:32]
+            # 检查是否已经创建过这个水印版本
+            with get_engine().connect() as conn:
+                existing = conn.execute(
+                    text("SELECT * FROM Versions WHERE link = :link"),
+                    {"link": link_hex}
+                ).first()
             
-            app.logger.info(f"Generated link: {link_hex} for {session_found['identity']}")
+            if existing:
+                app.logger.info(f"[RMAP-GET-LINK] Version already exists")
+                return jsonify({"result": link_hex}), 200
             
-            # Get or create a watermarked PDF for this group
-            identity = session_found['identity']
+            # 需要创建新的水印PDF
+            app.logger.info(f"[RMAP-GET-LINK] Creating watermarked PDF for {identity}")
             
             try:
                 with get_engine().begin() as conn:
-                    # Check if watermarked version already exists for this link
-                    existing = conn.execute(
-                        text("SELECT * FROM Versions WHERE link = :link"),
-                        {"link": link_hex}
+                    # 找一个文档来水印（优先flag文档）
+                    doc_row = conn.execute(
+                        text("""
+                            SELECT d.id, d.name, d.path 
+                            FROM Documents d 
+                            JOIN Users u ON d.ownerid = u.id 
+                            WHERE u.login LIKE '%Important%' 
+                            OR d.name LIKE '%flag%'
+                            ORDER BY d.id ASC
+                            LIMIT 1
+                        """)
                     ).first()
                     
-                    if not existing:
-                        # Find or create a document to watermark
-                        # First, try to find a flag document
+                    if not doc_row:
+                        # 如果没有flag文档，用第一个文档
                         doc_row = conn.execute(
-                            text("""
-                                SELECT d.id, d.name, d.path 
-                                FROM Documents d 
-                                JOIN Users u ON d.ownerid = u.id 
-                                WHERE u.login = 'MrImportant' 
-                                   OR d.name LIKE '%flag%'
-                                   OR u.login = 'admin'
-                                ORDER BY d.id ASC
-                                LIMIT 1
-                            """)
+                            text("SELECT id, name, path FROM Documents ORDER BY id ASC LIMIT 1")
                         ).first()
-                        
-                        if not doc_row:
-                            # Create a default document if none exists
-                            app.logger.warning("No document found, creating default")
-                            # You should have at least one document in the system
-                            # This is a fallback - ideally you should prepare documents beforehand
-                            return jsonify({"error": "no document available for watermarking"}), 404
-                        
-                        app.logger.info(f"Using document {doc_row.id}: {doc_row.name}")
-                        
-                        # Resolve file path
-                        file_path = _safe_resolve_under_storage(doc_row.path, app.config["STORAGE_DIR"])
-                        
-                        # Use your best watermarking method
-                        # Check which methods are available
-                        available_methods = list(WMUtils.METHODS.keys())
-                        best_method = "text-overlay" if "text-overlay" in available_methods else "toy-eof"
-                        
-                        # Create unique secret for this group
-                        secret = f"RMAP-{identity}-{link_hex[:8]}"
-                        key = app.config["SECRET_KEY"] or "default-rmap-key"
-                        
-                        app.logger.info(f"Applying watermark with method: {best_method}")
-                        
-                        # Apply watermark
-                        wm_bytes = WMUtils.apply_watermark(
-                            pdf=str(file_path),
-                            secret=secret,
-                            key=key,
-                            method=best_method,
-                            position="diagonal"
-                        )
-                        
-                        # Save watermarked file
-                        wm_dir = app.config["STORAGE_DIR"] / "rmap_watermarks"
-                        wm_dir.mkdir(parents=True, exist_ok=True)
-                        wm_path = wm_dir / f"rmap_{link_hex}.pdf"
-                        
-                        with wm_path.open("wb") as f:
-                            f.write(wm_bytes)
-                        
-                        app.logger.info(f"Watermarked PDF saved to {wm_path}")
-                        
-                        # Store in database
-                        conn.execute(
-                            text("""
-                                INSERT INTO Versions (documentid, link, intended_for, secret, method, position, path)
-                                VALUES (:documentid, :link, :intended_for, :secret, :method, :position, :path)
-                            """),
-                            {
-                                "documentid": doc_row.id,
-                                "link": link_hex,
-                                "intended_for": identity,
-                                "secret": secret,
-                                "method": best_method,
-                                "position": "diagonal",
-                                "path": str(wm_path)
-                            }
-                        )
-                        
-                        app.logger.info(f"Version record created in database")
+                    
+                    if not doc_row:
+                        app.logger.error(f"[RMAP-GET-LINK] No documents available")
+                        return jsonify({"error": "No document available for watermarking"}), 404
+                    
+                    app.logger.info(f"[RMAP-GET-LINK] Using document: {doc_row.name} (ID: {doc_row.id})")
+                    
+                    # 解析文件路径
+                    file_path = _safe_resolve_under_storage(doc_row.path, app.config["STORAGE_DIR"])
+                    
+                    if not file_path.exists():
+                        app.logger.error(f"[RMAP-GET-LINK] Document file not found: {file_path}")
+                        return jsonify({"error": "Document file not found"}), 404
+                    
+                    # 准备水印参数
+                    secret = f"RMAP-{identity}-{link_hex[:8]}"
+                    key = app.config["SECRET_KEY"] or "default-rmap-key"
+                    
+                    # 选择可用的水印方法
+                    available_methods = list(WMUtils.METHODS.keys())
+                    app.logger.info(f"[RMAP-GET-LINK] Available methods: {available_methods}")
+                    
+                    # 优先使用text-overlay，否则用第一个可用方法
+                    if "text-overlay" in available_methods:
+                        method = "text-overlay"
+                    elif "toy-eof" in available_methods:
+                        method = "toy-eof"
+                    else:
+                        method = available_methods[0]
+                    
+                    app.logger.info(f"[RMAP-GET-LINK] Using watermark method: {method}")
+                    
+                    # 应用水印
+                    wm_bytes = WMUtils.apply_watermark(
+                        pdf=str(file_path),
+                        secret=secret,
+                        key=key,
+                        method=method,
+                        position="diagonal"
+                    )
+                    
+                    # 保存水印文件
+                    wm_dir = app.config["STORAGE_DIR"] / "rmap_watermarks"
+                    wm_dir.mkdir(parents=True, exist_ok=True)
+                    wm_path = wm_dir / f"rmap_{link_hex}.pdf"
+                    
+                    with wm_path.open("wb") as f:
+                        f.write(wm_bytes)
+                    
+                    app.logger.info(f"[RMAP-GET-LINK] Saved watermarked PDF: {wm_path}")
+                    
+                    # 存入数据库
+                    conn.execute(
+                        text("""
+                            INSERT INTO Versions (documentid, link, intended_for, secret, method, position, path)
+                            VALUES (:documentid, :link, :intended_for, :secret, :method, :position, :path)
+                        """),
+                        {
+                            "documentid": doc_row.id,
+                            "link": link_hex,
+                            "intended_for": identity,
+                            "secret": secret,
+                            "method": method,
+                            "position": "diagonal",
+                            "path": str(wm_path)
+                        }
+                    )
+                    
+                    app.logger.info(f"[RMAP-GET-LINK] Database entry created")
             
             except Exception as e:
-                app.logger.error(f"Error creating watermarked PDF: {e}")
+                app.logger.error(f"[RMAP-GET-LINK] Failed to create watermark: {e}")
                 import traceback
                 app.logger.error(traceback.format_exc())
-                return jsonify({"error": "failed to create watermarked PDF"}), 500
+                return jsonify({"error": f"Failed to create watermarked PDF: {str(e)}"}), 500
             
-            # Clean up session
-            if session_key in app.rmap_sessions:
-                del app.rmap_sessions[session_key]
-            
-            # Return the link as per specification
+            # 返回结果
             return jsonify({"result": link_hex}), 200
             
         except Exception as e:
-            app.logger.error(f"RMAP get-link error: {e}")
+            app.logger.error(f"[RMAP-GET-LINK] Exception: {e}")
             import traceback
             app.logger.error(traceback.format_exc())
-            return jsonify({"error": "internal error processing RMAP"}), 500
+            return jsonify({"error": f"Internal error: {str(e)}"}), 500
 
 
     return app
