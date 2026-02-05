@@ -22,8 +22,9 @@ jobs:
       run: |
         cd server
         python -m pip install --upgrade pip
-        pip install -e ".[dev]"
-        pip install pytest-cov
+        pip install pytest pytest-cov
+        pip install Flask==3.0.3 SQLAlchemy==2.0.43 PyMuPDF>=1.21.1 PyMySQL==1.1.2
+        pip install werkzeug itsdangerous cryptography dill
 
     - name: Run tests with coverage
       run: |
