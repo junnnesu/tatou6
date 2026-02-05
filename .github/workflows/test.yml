@@ -1,0 +1,41 @@
+name: Run Unit Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        cd server
+        python -m pip install --upgrade pip
+        pip install pytest pytest-cov
+        pip install Flask==3.0.3 SQLAlchemy==2.0.43 PyMuPDF>=1.21.1 PyMySQL==1.1.2
+        pip install werkzeug itsdangerous cryptography dill
+
+    - name: Run tests with coverage
+      run: |
+        cd server
+        python -m pytest test/test_watermark_endpoints.py --cov=src --cov-report=html --cov-report=term --cov-branch -v
+      env:
+        TESTMODE: "1"
+
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: coverage-report
+        path: server/htmlcov/
