@@ -1,0 +1,40 @@
+name: Run Unit Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        cd server
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        pip install pytest-cov
+
+    - name: Run tests with coverage
+      run: |
+        cd server
+        python -m pytest test/test_watermark_endpoints.py --cov=src --cov-report=html --cov-report=term --cov-branch -v
+      env:
+        TESTMODE: "1"
+
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: coverage-report
+        path: server/htmlcov/
