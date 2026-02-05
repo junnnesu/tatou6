@@ -8,7 +8,8 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - user-files:/app/storage
+      - ./server/storage:/app/storage
+      - ./server/storage/pki:/app/storage/pki:ro
     environment:
       - PYTHONUNBUFFERED=1
       # DB connection details for future use by the API
@@ -18,6 +19,11 @@ services:
       - DB_USER=${MARIADB_USER}
       - DB_PASSWORD=${MARIADB_PASSWORD}
       - FLAG_2=${FLAG_2}
+      # 紧急安全修复：生产环境配置
+      - FLASK_ENV=production
+      - FLASK_DEBUG=False
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY:-secure-random-key-change-in-production}
     depends_on:
       db:
         condition: service_healthy
